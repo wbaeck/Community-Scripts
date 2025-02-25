@@ -101,6 +101,8 @@
     The .exe extension is not required, and the process name is case-insensitive.
 .PARAMETER RemovePath
     Supply a list of files and folders to be removed after the uninstallations have been processed. Use with -Force if all items are to be removed even if there is no software found to be uninstalled or if errors are encountered during uninstallation.
+.PARAMETER UninstallHiddenApps
+    In addition to "DisplayName", it also checks for hidden installed programs by checking for "QuietDisplayName" entries as well.
 .EXAMPLE
     PS C:\> Uninstall-Software.ps1 -DisplayName "Greenshot"
     
@@ -135,8 +137,8 @@
 #>
 [CmdletBinding(DefaultParameterSetName = 'AdditionalArguments')]
 param (
-    [Parameter(Mandatory)]
-    [String]$DisplayName,
+    [Parameter()]
+    [String]$DisplayName = "*Foxit PDF Editor 12*",
 
     [Parameter()]
     [ValidateSet('Both', 'x86', 'x64')]
@@ -144,7 +146,7 @@ param (
 
     [Parameter()]
     [ValidateSet('HKLM', 'HKCU')]
-    [String[]]$HivesToSearch = 'HKLM',
+    [String[]]$HivesToSearch = @('HKLM','HKCU'),
 
     [Parameter()]
     [ValidateSet(1, 0)]
@@ -185,8 +187,22 @@ param (
     [String]$ProcessName,
 
     [Parameter()]
-    [String[]]$RemovePath
+    [String[]]$RemovePath,
+
+    [Parameter()]
+    [Switch]$UninstallHiddenApps
 )
+
+# handle default switch setting
+if (-not $PSBoundParameters.ContainsKey('UninstallAll')) {
+    $UninstallAll = $true
+}
+if (-not $PSBoundParameters.ContainsKey('UninstallHiddenApps')) {
+    $UninstallHiddenApps = $true
+}
+if (-not $PSBoundParameters.ContainsKey('Force')) {
+    $Force = $false
+}
 
 function Get-InstalledSoftware {
     param(
@@ -252,45 +268,57 @@ function Get-InstalledSoftware {
         Write-Verbose $RegPath
     }
 
-    $PropertyNames = 'DisplayName', 'DisplayVersion', 'PSChildName', 'Publisher', 'InstallDate', 'QuietUninstallString', 'UninstallString', 'WindowsInstaller', 'SystemComponent'
+    $PropertyNames = 'DisplayName', 'QuietDisplayName', 'DisplayVersion', 'PSChildName', 'Publisher', 'InstallDate', 'QuietUninstallString', 'UninstallString', 'WindowsInstaller', 'SystemComponent'
 
     $AllFoundObjects = Get-ItemProperty -Path $FullPaths -Name $propertyNames -ErrorAction SilentlyContinue
 
     foreach ($Result in $AllFoundObjects) {
         try {
-            if ($Result.DisplayName -notlike $DisplayName) {
-                #Write-Verbose ('Skipping {0} as name does not match {1}' -f $Result.DisplayName, $DisplayName)
-                continue
+            if ($UninstallHiddenApps) {
+                if (($Result.DisplayName -notlike $DisplayName) -and ($Result.QuietDisplayName -notlike $DisplayName)) {
+                    #Write-Verbose ('Skipping {0}/{1} as name does not match {2}' -f $Result.DisplayName, $Result.QuietDisplayName, $DisplayName)
+                    continue
+                }
+            } else {
+                if ($Result.DisplayName -notlike $DisplayName) {
+                    #Write-Verbose ('Skipping {0} as name does not match {1}' -f $Result.DisplayName, $DisplayName)
+                    continue
+                }
+            }
+            if ([string]::IsNullOrEmpty($Result.DisplayName)) {
+                $Appname = $Result.QuietDisplayName
+            } else {
+                $Appname = $Result.DisplayName
             }
             # Casting to [bool] will return $false if the registry property is 0 or not present, and can also cast integers 0/1 to $false/$true.
             # Function accepts integers however, as supplying 1 for an expected bool works within powershell, but not on a powershell.exe command line.
             if ($PSBoundParameters.ContainsKey('WindowsInstaller') -and [bool]$Result.WindowsInstaller -ne [bool]$WindowsInstaller) {
-                Write-Verbose ('Skipping {0} as WindowsInstaller value {1} does not match {2}' -f $Result.DisplayName, $Result.WindowsInstaller, $WindowsInstaller)
+                Write-Verbose ('Skipping {0} as WindowsInstaller value {1} does not match {2}' -f $Appname, $Result.WindowsInstaller, $WindowsInstaller)
                 continue
             }
             if ($PSBoundParameters.ContainsKey('SystemComponent') -and [bool]$Result.SystemComponent -ne [bool]$SystemComponent) {
-                Write-Verbose ('Skipping {0} as SystemComponent value {1} does not match {2}' -f $Result.DisplayName, $Result.SystemComponent, $SystemComponent)
+                Write-Verbose ('Skipping {0} as SystemComponent value {1} does not match {2}' -f $Appname, $Result.SystemComponent, $SystemComponent)
                 continue
             }
             if ($PSBoundParameters.ContainsKey('VersionEqualTo') -and (ConvertTo-Version $Result.DisplayVersion) -ne (ConvertTo-Version $VersionEqualTo)) {
-                Write-Verbose ('Skipping {0} as version {1} is not equal to {2}' -f $Result.DisplayName, $Result.DisplayVersion, $VersionEqualTo)
+                Write-Verbose ('Skipping {0} as version {1} is not equal to {2}' -f $Appname, $Result.DisplayVersion, $VersionEqualTo)
                 continue
             }
             if ($PSBoundParameters.ContainsKey('VersionLessThan') -and (ConvertTo-Version $Result.DisplayVersion) -ge (ConvertTo-Version $VersionLessThan)) {
-                Write-Verbose ('Skipping {0} as version {1} is not less than {2}' -f $Result.DisplayName, $Result.DisplayVersion, $VersionLessThan)
+                Write-Verbose ('Skipping {0} as version {1} is not less than {2}' -f $Appname, $Result.DisplayVersion, $VersionLessThan)
                 continue
             }
             if ($PSBoundParameters.ContainsKey('VersionGreaterThan') -and (ConvertTo-Version $Result.DisplayVersion) -le (ConvertTo-Version $VersionGreaterThan)) {
-                Write-Verbose ('Skipping {0} as version {1} is not greater than {2}' -f $Result.DisplayName, $Result.DisplayVersion, $VersionGreaterThan)
+                Write-Verbose ('Skipping {0} as version {1} is not greater than {2}' -f $Appname, $Result.DisplayVersion, $VersionGreaterThan)
                 continue
             }
             # If we get here, then all criteria have been met
-            Write-Verbose ('Found matching application {0} {1}' -f $Result.DisplayName, $Result.DisplayVersion)
+            Write-Verbose ('Found matching application {0} {1}' -f $Appname, $Result.DisplayVersion)
             $Result | Select-Object -Property $PropertyNames
         }
         catch {
             # ConvertTo-Version will throw an error if it can't convert the version string to a [version] object
-            Write-Warning "Error processing $($Result.DisplayName): $_"
+            Write-Warning "Error processing $($Appname): $_"
             continue
         }
 
